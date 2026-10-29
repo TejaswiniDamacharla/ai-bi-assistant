@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Business Intelligence Assistant</title>
+<style>
+  :root { --bg:#f5f7fb; --card:#fff; --text:#1c2333; --muted:#667085; --brand:#3b5bdb; --line:#e4e7ee; --ok:#0b7a53; --warn:#b54708; --err:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1420; --card:#171d2c; --text:#e8ecf5; --muted:#98a2b3; --brand:#7c93ff; --line:#2a3247; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 880px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
+  .row { display:flex; gap:8px; }
+  input[type=text] { flex:1; padding:12px 14px; font-size:1rem; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--text); }
+  button { padding:12px 18px; font-size:1rem; border:0; border-radius:10px; background:var(--brand); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip { padding:6px 12px; font-size:.85rem; background:transparent; color:var(--brand); border:1px solid var(--line); border-radius:999px; }
+  .answer { font-size:1.15rem; line-height:1.5; margin:0 0 10px; }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.78rem; border:1px solid var(--line); color:var(--muted); margin-right:6px; }
+  .meta { color:var(--muted); font-size:.85rem; margin:6px 0 12px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse: collapse; width:100%; font-size:.92rem; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; }
+  td.num, th.num { text-align:right; }
+  details { margin-top:12px; } summary { cursor:pointer; color:var(--muted); }
+  pre { background:var(--bg); padding:10px; border-radius:8px; overflow-x:auto; font-size:.82rem; }
+  ul { margin:6px 0 0; padding-left:20px; color:var(--muted); font-size:.88rem; }
+  .err { color:var(--err); font-weight:600; margin:0 0 6px; }
+  .link { background:none; color:var(--brand); padding:0; font-size:.85rem; text-decoration:underline; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AI Business Intelligence Assistant</h1>
+  <p class="sub">Ask questions about the sales data in plain English. Every number comes from a database query, shown below the answer.</p>
+
+  <div class="card">
+    <div class="row">
+      <input id="q" type="text" maxlength="500" placeholder="e.g. Which region generated the highest sales?" autofocus>
+      <button id="ask">Ask</button>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div id="result"></div>
+
+  <div class="card">
+    <button class="link" id="dqBtn">Show data-quality report (rows rejected while loading the CSV)</button>
+    <div id="dq" class="hidden"></div>
+  </div>
+</main>
+
+<script>
+const EXAMPLES = [
+  "What is the total revenue?",
+  "Which product generated the highest revenue?",
+  "Show the monthly revenue trend",
+  "Which region generated the highest sales?",
+  "How did revenue change between January and February?",
+  "Monthly revenue trend for the North region",
+  "What is the lowest revenue category?"
+];
+const $ = (id) => document.getElementById(id);
+const inr = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 });
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  children.flat().forEach((c) => node.append(c));
+  return node;
+}
+
+function formatCell(value, format) {
+  if (value === null || value === undefined) return "n/a";
+  if (format === "inr") return inr.format(value);
+  if (format === "pct") return (value > 0 ? "+" : "") + value + "%";
+  return String(value);
+}
+
+function renderTable(data) {
+  const { columns, rows, formats } = data;
+  const head = el("tr", {}, columns.map((c) => el("th", { className: formats[c] || typeof rows[0]?.[columns.indexOf(c)] === "number" ? "num" : "", textContent: c.replaceAll("_", " ") })));
+  const body = rows.map((r) => el("tr", {}, r.map((v, i) => {
+    const fmt = formats[columns[i]];
+    return el("td", { className: fmt || typeof v === "number" ? "num" : "", textContent: formatCell(v, fmt) });
+  })));
+  return el("div", { className: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, body)));
+}
+
+function showSuccess(d) {
+  const by = { llm: "Interpreted by AI (LLM)", rules: "Interpreted by rules", rules_fallback: "AI unavailable - used rules" }[d.interpretation.interpreted_by];
+  const i = d.interpretation;
+  const understood = [i.intent.replaceAll("_", " ")]
+    .concat(i.dimension ? [`by ${i.dimension} (${i.order})`] : [])
+    .concat(i.months.length ? [`months: ${i.months.join(" vs ")}`] : [])
+    .concat(Object.entries(i.filters).map(([k, v]) => `${k} = ${v}`));
+  const box = el("div", { className: "card" },
+    el("p", { className: "answer", textContent: d.answer }),
+    el("span", { className: "badge", textContent: by }),
+    el("div", { className: "meta", textContent: "Understood as: " + understood.join(" | ") }),
+    renderTable(d.supporting_data),
+    el("details", {}, el("summary", { textContent: "SQL used" }),
+      el("pre", { textContent: d.sql + "\n\n-- parameters: " + JSON.stringify(d.sql_params) })),
+    el("details", {}, el("summary", { textContent: "Assumptions" }),
+      el("ul", {}, d.assumptions.concat(i.notes).map((a) => el("li", { textContent: a })))));
+  $("result").replaceChildren(box);
+}
+
+function showError(message, suggestions) {
+  const box = el("div", { className: "card" }, el("p", { className: "err", textContent: message }));
+  if (suggestions && suggestions.length) {
+    box.append(el("div", { className: "meta", textContent: "Try one of these:" }));
+    const chips = el("div", { className: "chips" });
+    suggestions.forEach((s) => chips.append(chip(s)));
+    box.append(chips);
+  }
+  $("result").replaceChildren(box);
+}
+
+function chip(text) {
+  return el("button", { className: "chip", textContent: text, onclick: () => { $("q").value = text; $("q").focus(); } });
+}
+
+async function ask() {
+  const question = $("q").value;
+  $("ask").disabled = true;
+  try {
+    const res = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) });
+    const data = await res.json();
+    if (data.status === "ok") showSuccess(data);
+    else showError(data.error.message, data.error.suggestions);
+  } catch (e) {
+    showError("Could not reach the server. Is it running?");
+  } finally {
+    $("ask").disabled = false;
+  }
+}
+
+$("ask").addEventListener("click", ask);
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
+EXAMPLES.forEach((t) => $("chips").append(chip(t)));
+
+$("dqBtn").addEventListener("click", async () => {
+  const box = $("dq");
+  if (!box.classList.toggle("hidden")) {
+    const d = await (await fetch("/api/data-quality")).json();
+    const rows = d.rejected_records.map((r) => [r.csv_line, r.transaction_id ?? "-", r.reason]);
+    box.replaceChildren(
+      el("div", { className: "meta", textContent: `Loaded ${d.data_load.loaded} of ${d.data_load.total_rows} rows; ${d.data_load.rejected} rejected. Status counts: ${JSON.stringify(d.loaded_by_status)}` }),
+      renderTable({ columns: ["csv_line", "transaction_id", "reason"], rows, formats: {} }));
+  }
+});
+</script>
+</body>
+</html>
